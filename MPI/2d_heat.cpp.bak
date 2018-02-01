@@ -1,0 +1,134 @@
+#include <iostream>
+#include <mpi.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <chrono>
+#include <time.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+void calc_2d_heat(float*, float*, unsigned long long int, unsigned long long int);
+void initialize_chunk(float*, unsigned long long int, unsigned long long int);
+
+int main (int argc, char* argv[]) {
+
+  if (argc < 3) {
+    std::cerr<<"usage: mpirun "<<argv[0]<<" <n> <k>"<<std::endl;
+    return -1;
+  }
+  
+  int p, P;
+  
+  MPI_Init(&argc, &argv);
+  
+  MPI_Comm_rank(MPI_COMM_WORLD, &p);
+  MPI_Comm_size(MPI_COMM_WORLD, &P);
+  
+  unsigned long long int n = atoi(argv[1]);
+  unsigned int k = atoi(argv[2]);
+  
+  //initialize variables
+  //std::cerr<<"initializing vars"<<std::endl;
+  unsigned long long int rows = (p == P-1) ? (n/P) + (n%P) + 2 : (n/P) + 2;
+  unsigned long long int size = rows * n;
+  float* temp;
+  //float* temp1 = new float[size];
+  //std::cerr<<"malloc temp1"<<std::endl;
+  float* temp1 = (float*)malloc(rows * n * sizeof(float));
+  //float* temp2 = new float[size];
+  //std::cerr<<"malloc temp2"<<std::endl;
+  float* temp2 = (float*)malloc(rows * n * sizeof(float));
+  if (temp1 == NULL || temp2 == NULL) {
+    std::cerr<<"Could not allocate required memory."<<std::endl;
+    return -1;
+  }
+
+  float* last = temp1;
+  float* curr = temp2;
+  MPI_Request* requests = (p == 0 || p == P-1) ? new MPI_Request[2] : new MPI_Request[4];
+  MPI_Status* statuses = new MPI_Status[2];
+  unsigned long long int lastRow = size - n;
+  initialize_chunk(last, rows, n);
+  
+  MPI_Barrier(MPI_COMM_WORLD);
+  auto start = std::chrono::system_clock::now();
+  
+  for (int i=0; i<k; i++) {
+    //std::cerr<<"copy data"<<std::endl;
+    if (P == 1) {
+      memcpy(curr, last, n * sizeof(float));
+      memcpy(curr + lastRow, last + lastRow, n * sizeof(float));
+    }
+    else if (p == 0) {
+      MPI_Irecv(last + lastRow, n, MPI_FLOAT, p+1, 0, MPI_COMM_WORLD, &requests[0]);
+      MPI_Isend(last + lastRow - n, n, MPI_FLOAT, p+1, 0, MPI_COMM_WORLD, &requests[1]);
+      memcpy(curr, last, n * sizeof(float));
+      MPI_Waitall(1, requests, statuses);
+    }
+    else if (p == P-1) {
+      MPI_Irecv(last, n, MPI_FLOAT, p-1, 0, MPI_COMM_WORLD, &requests[0]);
+      MPI_Isend(last + n, n, MPI_FLOAT, p-1, 0, MPI_COMM_WORLD, &requests[1]);
+      memcpy(curr + lastRow, last + lastRow, n * sizeof(float));
+      MPI_Waitall(1, requests, statuses);
+    }
+    else {
+      MPI_Irecv(last, n, MPI_FLOAT, p-1, 0, MPI_COMM_WORLD, &requests[0]);
+      MPI_Irecv(last + lastRow, n, MPI_FLOAT, p+1, 0, MPI_COMM_WORLD, &requests[1]);
+      MPI_Isend(last + n, n, MPI_FLOAT, p-1, 0, MPI_COMM_WORLD, &requests[2]);
+      MPI_Isend(last + lastRow - n, n, MPI_FLOAT, p+1, 0, MPI_COMM_WORLD, &requests[3]);
+      MPI_Waitall(2, requests, statuses);
+    }
+    //std::cerr<<"calc"<<std::endl;
+    calc_2d_heat(curr, last, rows, n);
+    //std::cerr<<"swap buffer pointers"<<std::endl;
+    //temp = curr;
+    //curr = last;
+    //last = temp;
+    curr = (i%2==0) ? temp1 : temp2;
+    last = (i%2==0) ? temp2 : temp1;
+  }
+  
+  
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (p == 0) {
+    //std::cout<<global_result<<std::endl;
+    auto end = std::chrono::system_clock::now();
+    std::chrono::duration<double> diff = end-start;
+    std::cerr<<diff.count()<<std::endl;
+  }
+    
+  MPI_Finalize();
+  return 0;
+}
+
+void calc_2d_heat(float* curr, float* last, unsigned long long int rows, unsigned long long int n) {
+  for (int i=1; i<rows-1; i++) {
+    //std::cerr<<"i="<<i<<std::endl;
+    //calc end caps
+    curr[i*n] = ((2 * last[(i-1)*n]) + (2 * last[i*n]) + (2 * last[(i+1)*n]) + last[((i-1)*n)+1] + last[(i*n)+1] + last[((i+1)*n)+1]) / 9;
+    curr[i*n+(n-1)] = ((2 * last[((i-1)*n)+(n-1)]) + (2 * last[(i*n)+(n-1)]) + (2 * last[((i+1)*n)+(n-1)]) + last[((i-1)*n)+(n-2)] + last[(i*n)+(n-2)] + last[((i+1)*n)+(n-2)]) / 9;
+    //fill in the rest
+    for (int j=1; j<n-1; j++) {
+      curr[(i*n)+j] = (last[((i-1)*n)+(j-1)] + last[(i*n)+(j-1)] + last[((i+1)*n)+(j-1)] + last[((i-1)*n)+j] + last[(i*n)+j] + last[((i+1)*n)+j] + last[((i-1)*n)+(j+1)] + last[(i*n)+(j+1)] + last[((i+1)*n)+(j+1)]) / 9;
+    }
+  }  
+}
+
+void initialize_chunk(float* arr, unsigned long long int rows, unsigned long long int n) {
+  srand(time(NULL));
+  for (int i=1; i<rows; i++) {
+    for (int j=0; j<n; j++) {
+      //std::cerr<<"index="<<(i*n)+j<<std::endl;
+      arr[(i*n)+j] = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+    }
+  }
+}
